@@ -3,17 +3,49 @@ Fast dataset loader for pre-computed embeddings and tokens
 
 This dataset loads from .pt files created by preprocess_dataset.py
 Much faster than computing embeddings on-the-fly during training.
+
+Features:
+- Parallel loading with multiprocessing workers
+- Progress bars with tqdm
+- Memory-efficient lazy loading or preload-to-memory option
 """
 
 import torch
 from torch.utils.data import Dataset
 from pathlib import Path
-from typing import Optional, Dict, Union, List
+from typing import Optional, Dict, Union, List, Tuple
 import logging
 import time
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def _load_single_file(args: Tuple[Path, Optional[int], Optional[int]]) -> Optional[Dict]:
+    """
+    Worker function to load a single .pt file
+    Used by multiprocessing pool
+    """
+    file_path, max_text_len, max_speech_len = args
+    try:
+        data = torch.load(file_path, weights_only=False, map_location='cpu')
+        
+        # Apply length filters
+        text_len = data['text_token_lens'].item() if hasattr(data['text_token_lens'], 'item') else data['text_token_lens']
+        speech_len = data['speech_token_lens'].item() if hasattr(data['speech_token_lens'], 'item') else data['speech_token_lens']
+        
+        if max_text_len and text_len > max_text_len:
+            return None
+        
+        if max_speech_len and speech_len > max_speech_len:
+            return None
+        
+        return data
+    except Exception as e:
+        return None
 
 
 class PrecomputedDataset(Dataset):
@@ -26,6 +58,8 @@ class PrecomputedDataset(Dataset):
         max_speech_len: Maximum speech token length (optional, for additional filtering)
         preload_to_memory: If True, load all data to RAM at init (faster training, uses more RAM)
         show_progress: If True, show progress bar during loading
+        num_workers: Number of parallel workers for loading (default: auto-detect)
+        use_threading: Use threading instead of multiprocessing (better for I/O bound, NFS)
     """
     
     def __init__(
@@ -35,12 +69,21 @@ class PrecomputedDataset(Dataset):
         max_speech_len: Optional[int] = None,
         preload_to_memory: bool = False,
         show_progress: bool = True,
+        num_workers: Optional[int] = None,
+        use_threading: bool = False,
     ):
         self.preprocessed_dir = Path(preprocessed_dir)
         self.max_text_len = max_text_len
         self.max_speech_len = max_speech_len
         self.preload_to_memory = preload_to_memory
         self.show_progress = show_progress
+        self.use_threading = use_threading
+        
+        # Auto-detect number of workers
+        if num_workers is None:
+            self.num_workers = min(mp.cpu_count(), 8)  # Cap at 8 for I/O bound tasks
+        else:
+            self.num_workers = num_workers
         
         # Cached data (if preload_to_memory=True)
         self._cached_data: Optional[List[Dict]] = None
@@ -92,12 +135,110 @@ class PrecomputedDataset(Dataset):
     def _preload_all_data(self):
         """Load all .pt files into memory for faster access during training"""
         logger.info(f"📥 Preloading {len(self.data_files):,} files to memory...")
+        logger.info(f"   Using {self.num_workers} {'threads' if self.use_threading else 'processes'}")
         
         self._cached_data = []
         skipped_count = 0
         error_count = 0
         
-        # Create progress bar
+        start_time = time.time()
+        
+        if self.num_workers > 1:
+            # Parallel loading with workers
+            self._cached_data = self._parallel_load()
+            skipped_count = len(self.data_files) - len(self._cached_data)
+        else:
+            # Sequential loading (original behavior)
+            self._cached_data = self._sequential_load()
+            skipped_count = len(self.data_files) - len(self._cached_data)
+        
+        load_time = time.time() - start_time
+        
+        # Update data_files to match cached data
+        self.data_files = self.data_files[:len(self._cached_data)]
+        
+        logger.info(f"📦 Preloaded {len(self._cached_data):,} samples to memory ({load_time:.1f}s)")
+        if skipped_count > 0:
+            logger.info(f"   Skipped {skipped_count:,} samples (exceeded length limits or errors)")
+        
+        # Estimate memory usage
+        if len(self._cached_data) > 0:
+            sample_size = sum(
+                v.element_size() * v.numel() if torch.is_tensor(v) else 0
+                for v in self._cached_data[0].values()
+            )
+            total_mb = (sample_size * len(self._cached_data)) / (1024 * 1024)
+            logger.info(f"   Estimated memory usage: {total_mb:.1f} MB")
+            
+        # Show speed stats
+        files_per_sec = len(self.data_files) / load_time if load_time > 0 else 0
+        logger.info(f"   Loading speed: {files_per_sec:.1f} files/sec")
+    
+    def _parallel_load(self) -> List[Dict]:
+        """Load files in parallel using multiprocessing or threading"""
+        loaded_data = []
+        
+        # Prepare arguments for workers
+        load_args = [
+            (f, self.max_text_len, self.max_speech_len) 
+            for f in self.data_files
+        ]
+        
+        # Choose executor based on use_threading flag
+        ExecutorClass = ThreadPoolExecutor if self.use_threading else ProcessPoolExecutor
+        
+        with ExecutorClass(max_workers=self.num_workers) as executor:
+            # Submit all tasks
+            futures = {
+                executor.submit(_load_single_file, args): i 
+                for i, args in enumerate(load_args)
+            }
+            
+            # Process results with progress bar
+            pbar = tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"Loading ({self.num_workers} workers)",
+                unit="files",
+                disable=not self.show_progress,
+                dynamic_ncols=True,
+            )
+            
+            # Collect results maintaining order
+            results = [None] * len(self.data_files)
+            loaded_count = 0
+            skipped_count = 0
+            
+            for future in pbar:
+                idx = futures[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        results[idx] = result
+                        loaded_count += 1
+                    else:
+                        skipped_count += 1
+                except Exception as e:
+                    skipped_count += 1
+                
+                pbar.set_postfix({
+                    'loaded': loaded_count,
+                    'skipped': skipped_count,
+                })
+            
+            pbar.close()
+        
+        # Filter out None values while maintaining order
+        loaded_data = [r for r in results if r is not None]
+        
+        return loaded_data
+    
+    def _sequential_load(self) -> List[Dict]:
+        """Load files sequentially (fallback when workers=1)"""
+        loaded_data = []
+        skipped_count = 0
+        error_count = 0
+        
         pbar = tqdm(
             self.data_files,
             desc="Loading data",
@@ -122,11 +263,10 @@ class PrecomputedDataset(Dataset):
                     skipped_count += 1
                     continue
                 
-                self._cached_data.append(data)
+                loaded_data.append(data)
                 
-                # Update progress bar with stats
                 pbar.set_postfix({
-                    'loaded': len(self._cached_data),
+                    'loaded': len(loaded_data),
                     'skipped': skipped_count,
                     'errors': error_count,
                 })
@@ -135,28 +275,9 @@ class PrecomputedDataset(Dataset):
                 error_count += 1
                 if error_count <= 5:
                     logger.warning(f"⚠️ Error loading {data_file.name}: {e}")
-                elif error_count == 6:
-                    logger.warning("... suppressing further error messages")
         
         pbar.close()
-        
-        # Update data_files to match cached data
-        self.data_files = self.data_files[:len(self._cached_data)]
-        
-        logger.info(f"📦 Preloaded {len(self._cached_data):,} samples to memory")
-        if skipped_count > 0:
-            logger.info(f"   Skipped {skipped_count:,} samples (exceeded length limits)")
-        if error_count > 0:
-            logger.warning(f"   ⚠️ {error_count:,} files had errors")
-        
-        # Estimate memory usage
-        if len(self._cached_data) > 0:
-            sample_size = sum(
-                v.element_size() * v.numel() if torch.is_tensor(v) else 0
-                for v in self._cached_data[0].values()
-            )
-            total_mb = (sample_size * len(self._cached_data)) / (1024 * 1024)
-            logger.info(f"   Estimated memory usage: {total_mb:.1f} MB")
+        return loaded_data
     
     def __len__(self):
         if self._cached_data is not None:
