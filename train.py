@@ -295,7 +295,7 @@ def main():
     
     print("\n🚀 Starting training...\n")
     
-    # Create model arguments
+    # Create model arguments with SOTA loss config
     model_args = ModelArguments(
         model_name_or_path="ResembleAI/chatterbox",
         cache_dir="./cache",
@@ -303,6 +303,14 @@ def main():
         freeze_s3gen=True,
         tokenizer_path=str(tokenizer_path),
         gradient_checkpointing=args.gradient_checkpointing,
+        # SOTA Loss configuration
+        label_smoothing=args.label_smoothing,
+        text_loss_weight=args.text_loss_weight,
+        speech_loss_weight=args.speech_loss_weight,
+        use_focal_loss=args.use_focal_loss,
+        focal_gamma=args.focal_gamma,
+        use_z_loss=args.use_zloss,
+        z_loss_weight=args.zloss_weight,
     )
     
     # Create data arguments

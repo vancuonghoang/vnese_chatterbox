@@ -56,6 +56,15 @@ from chatterbox.models.t3.t3 import T3, T3Cond
 from chatterbox.models.t3.modules.t3_config import T3Config
 from chatterbox.models.s3tokenizer import S3_SR
 
+# Import SOTA loss functions
+try:
+    from chatterbox.utils.loss import T3LossCalculator, LossConfig, compute_t3_loss
+    SOTA_LOSS_AVAILABLE = True
+except ImportError:
+    SOTA_LOSS_AVAILABLE = False
+    T3LossCalculator = None
+    LossConfig = None
+
 try:
     from chatterbox.utils.training_args import CustomTrainingArguments
 except ImportError:
@@ -120,6 +129,36 @@ class ModelArguments:
     gradient_checkpointing: bool = field(
         default=True,
         metadata={"help": "Enable gradient checkpointing to save ~30% VRAM at the cost of ~20% slower training."}
+    )
+    
+    # SOTA Loss Configuration
+    label_smoothing: float = field(
+        default=0.1,
+        metadata={"help": "Label smoothing factor for cross-entropy loss. 0.0 to disable."}
+    )
+    text_loss_weight: float = field(
+        default=0.1,
+        metadata={"help": "Weight for text loss in total loss computation."}
+    )
+    speech_loss_weight: float = field(
+        default=1.0,
+        metadata={"help": "Weight for speech loss in total loss computation."}
+    )
+    use_focal_loss: bool = field(
+        default=False,
+        metadata={"help": "Use Focal Loss for handling rare tokens (Vietnamese tones)."}
+    )
+    focal_gamma: float = field(
+        default=2.0,
+        metadata={"help": "Gamma parameter for Focal Loss."}
+    )
+    use_z_loss: bool = field(
+        default=False,
+        metadata={"help": "Use Z-Loss for numerical stability (from PaLM)."}
+    )
+    z_loss_weight: float = field(
+        default=1e-4,
+        metadata={"help": "Weight for Z-Loss."}
     )
 
 @dataclass
@@ -872,7 +911,29 @@ class SpeechDataCollator:
         }
 # --- Model Wrapper ---
 class T3ForFineTuning(torch.nn.Module):
-    def __init__(self, t3_model: T3, chatterbox_t3_config: T3Config):
+    """
+    Wrapper for T3 model with SOTA loss functions for fine-tuning.
+    
+    Supports:
+    - Label Smoothing (default: 0.1)
+    - Loss Weighting (text=0.1, speech=1.0)
+    - Focal Loss (optional, for rare token handling)
+    - Z-Loss (optional, for numerical stability)
+    """
+    
+    def __init__(
+        self, 
+        t3_model: T3, 
+        chatterbox_t3_config: T3Config,
+        # SOTA Loss configuration
+        label_smoothing: float = 0.1,
+        text_weight: float = 0.1,
+        speech_weight: float = 1.0,
+        use_focal_loss: bool = False,
+        focal_gamma: float = 2.0,
+        use_z_loss: bool = False,
+        z_loss_weight: float = 1e-4,
+    ):
         super().__init__()
         self.t3 = t3_model
         self.chatterbox_t3_config = chatterbox_t3_config
@@ -880,6 +941,28 @@ class T3ForFineTuning(torch.nn.Module):
         # Store last losses for logging
         self.last_loss_text = None
         self.last_loss_speech = None
+        
+        # Initialize SOTA loss calculator if available
+        self.loss_calculator = None
+        if SOTA_LOSS_AVAILABLE and T3LossCalculator is not None:
+            self.loss_calculator = T3LossCalculator(
+                text_weight=text_weight,
+                speech_weight=speech_weight,
+                label_smoothing=label_smoothing,
+                use_focal_loss=use_focal_loss,
+                focal_gamma=focal_gamma,
+                use_z_loss=use_z_loss,
+                z_loss_weight=z_loss_weight,
+            )
+            logger.info(f"✅ SOTA Loss enabled: label_smoothing={label_smoothing}, "
+                       f"text_weight={text_weight}, speech_weight={speech_weight}, "
+                       f"focal_loss={use_focal_loss}, z_loss={use_z_loss}")
+        else:
+            logger.warning("⚠️ SOTA Loss not available, using standard cross-entropy")
+            # Store config for fallback
+            self._label_smoothing = label_smoothing
+            self._text_weight = text_weight
+            self._speech_weight = speech_weight
 
         class HFCompatibleConfig(PretrainedConfig):
             model_type = "chatterbox_t3_finetune"
@@ -917,23 +1000,66 @@ class T3ForFineTuning(torch.nn.Module):
                                 emotion_adv=t3_cond_emotion_adv
                                 ).to(device=self.t3.device)
 
-        loss_text, loss_speech, speech_logits = self.t3.loss(
-                                t3_cond=current_t3_cond,
-                                text_tokens=text_tokens,
-                                text_token_lens=text_token_lens,
-                                speech_tokens=speech_tokens,
-                                speech_token_lens=speech_token_lens,
-                                labels_text =labels_text,
-                                labels_speech=labels_speech
-                                )
+        # Get logits from T3 model (we'll compute loss ourselves with SOTA functions)
+        out = self.t3.forward(
+            t3_cond=current_t3_cond,
+            text_tokens=text_tokens,
+            text_token_lens=text_token_lens,
+            speech_tokens=speech_tokens,
+            speech_token_lens=speech_token_lens,
+            training=True,
+        )
+        
+        # Prepare logits for loss computation
+        # Align logits: predict t₁..EOS from inputs [BOS, t₁..]
+        logits_for_text = out.text_logits[:, :-1, :].contiguous()
+        logits_for_speech = out.speech_logits[:, :-1, :].contiguous()
+        
+        IGNORE_ID = -100
+        device = out.text_logits.device
+        
+        # Compute loss using SOTA calculator if available
+        if self.loss_calculator is not None:
+            total_loss, loss_dict = self.loss_calculator(
+                text_logits=logits_for_text,
+                speech_logits=logits_for_speech,
+                labels_text=labels_text,
+                labels_speech=labels_speech,
+            )
+            loss_text = loss_dict.get('loss_text', torch.tensor(0.0, device=device))
+            loss_speech = loss_dict.get('loss_speech', torch.tensor(0.0, device=device))
+        else:
+            # Fallback to standard cross-entropy with label smoothing
+            if logits_for_text.size(1) == 0:
+                loss_text = torch.tensor(0.0, device=device, requires_grad=self.training)
+            else:
+                loss_text = F.cross_entropy(
+                    logits_for_text.transpose(1, 2),
+                    labels_text,
+                    ignore_index=IGNORE_ID,
+                    label_smoothing=getattr(self, '_label_smoothing', 0.1)
+                )
+            
+            if logits_for_speech.size(1) == 0:
+                loss_speech = torch.tensor(0.0, device=device, requires_grad=self.training)
+            else:
+                loss_speech = F.cross_entropy(
+                    logits_for_speech.transpose(1, 2),
+                    labels_speech,
+                    ignore_index=IGNORE_ID,
+                    label_smoothing=getattr(self, '_label_smoothing', 0.1)
+                )
+            
+            # Apply loss weighting
+            text_weight = getattr(self, '_text_weight', 0.1)
+            speech_weight = getattr(self, '_speech_weight', 1.0)
+            total_loss = text_weight * loss_text + speech_weight * loss_speech
         
         # Store losses for logging by SafeCheckpointTrainer
-        self.last_loss_text = loss_text
-        self.last_loss_speech = loss_speech
+        self.last_loss_text = loss_text.detach() if torch.is_tensor(loss_text) else loss_text
+        self.last_loss_speech = loss_speech.detach() if torch.is_tensor(loss_speech) else loss_speech
         
-        total_loss = loss_text + loss_speech
-
-        return total_loss, speech_logits
+        return total_loss, out.speech_logits
 
 
 # --- Compute Metrics Function ---
@@ -1741,7 +1867,26 @@ def run_training(model_args, data_args, training_args):
                                        chatterbox_t3_config_instance.stop_text_token,
                                        chatterbox_t3_config_instance.stop_speech_token)
 
-    hf_trainable_model = T3ForFineTuning(t3_model, chatterbox_t3_config_instance)
+    # Initialize T3ForFineTuning with SOTA loss configuration
+    hf_trainable_model = T3ForFineTuning(
+        t3_model=t3_model,
+        chatterbox_t3_config=chatterbox_t3_config_instance,
+        # SOTA Loss config from model_args
+        label_smoothing=model_args.label_smoothing,
+        text_weight=model_args.text_loss_weight,
+        speech_weight=model_args.speech_loss_weight,
+        use_focal_loss=model_args.use_focal_loss,
+        focal_gamma=model_args.focal_gamma,
+        use_z_loss=model_args.use_z_loss,
+        z_loss_weight=model_args.z_loss_weight,
+    )
+    
+    logger.info(f"📊 Loss Configuration:")
+    logger.info(f"   Label Smoothing: {model_args.label_smoothing}")
+    logger.info(f"   Text Weight: {model_args.text_loss_weight}")
+    logger.info(f"   Speech Weight: {model_args.speech_loss_weight}")
+    logger.info(f"   Focal Loss: {model_args.use_focal_loss} (gamma={model_args.focal_gamma})")
+    logger.info(f"   Z-Loss: {model_args.use_z_loss} (weight={model_args.z_loss_weight})")
 
     # If evaluation was requested but no eval_dataset was built (e.g. streaming), disable eval
     if training_args.do_eval and eval_dataset is None:

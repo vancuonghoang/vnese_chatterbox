@@ -21,9 +21,12 @@ Dưới đây là bản cập nhật **Revised Plan** dựa trên các thảo lu
 | Feature | Status | File | Notes |
 |---------|--------|------|-------|
 | **SOTA Loss Functions** | ✅ DONE | `src/chatterbox/utils/loss.py` | FocalLoss, ZLoss, Label Smoothing, Loss Weighting |
+| **Loss Integration** | ✅ DONE | `src/finetune_t3_thai.py` | `T3ForFineTuning` uses `T3LossCalculator` |
 | **Gradient Checkpointing** | ✅ DONE | `src/finetune_t3_thai.py` | Flag `--gradient_checkpointing` |
 | **Dynamic Batching** | ✅ DONE | `src/finetune_t3_thai.py` | `LengthGroupedSampler`, flag `--use_dynamic_batching` |
 | **Best Model Checkpoint** | ✅ DONE | `src/finetune_t3_thai.py` | `BestModelCallback`, tracks `eval_loss_speech` |
+| **train.py Integration** | ✅ DONE | `train.py` | All SOTA features exposed via CLI args |
+| **Dataset Logging/Progress** | ✅ DONE | `src/chatterbox/utils/preprocessed_dataset.py` | tqdm bars, verbose logging, preload_all option |
 | **Data Augmentation** | ⏳ TODO | - | Speed perturbation, noise injection |
 | **DeepSpeed/FSDP** | ⏳ TODO | - | Multi-GPU scaling |
 | **LoRA Fine-tuning** | ⏳ TODO | - | Parameter-efficient fine-tuning |
