@@ -1,0 +1,46 @@
+# LoRA Configuration for 2-5h Audio Fine-tuning
+# Optimized for T4 GPU (16GB VRAM)
+
+lora:
+  # LoRA hyperparameters
+  r: 8                        # Rank (8 for small datasets)
+  lora_alpha: 16              # Scaling factor (2x rank)
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+
+training:
+  # Batch settings
+  batch_size: 4               # Per device
+  gradient_accumulation_steps: 4  # Effective batch = 16
+  
+  # Optimizer
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 100
+  max_grad_norm: 1.0
+  
+  # Schedule
+  num_epochs: 10
+  
+  # Saving
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
+  
+  # Precision
+  bf16: true                  # BF16 for A100, FP16 for T4
+
+loss:
+  label_smoothing: 0.1
+  text_weight: 0.1
+  speech_weight: 1.0
+  use_z_loss: true
+  z_loss_weight: 1.0e-4
+
+wandb:
+  project: "viterbox-lora"
+  log_model: true

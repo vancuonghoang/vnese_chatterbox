@@ -1,0 +1,16 @@
+# Training dependencies for Viterbox
+# Install with: pip install -r requirements-train.txt
+
+# PEFT for LoRA
+peft>=0.7.0
+
+# WandB for experiment tracking
+wandb>=0.16.0
+
+# Transformers training utilities
+transformers>=4.35.0
+accelerate>=0.25.0
+datasets>=2.14.0
+
+# Optional: TensorBoard (alternative to WandB)
+tensorboard>=2.14.0
