@@ -32,12 +32,11 @@ import numpy as np
 from multiprocessing import Pool, Manager
 import sys
 
-# Add parent directory to path (where src is located)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Add parent directory to path (where viterbox-tts is located)
+sys.path.insert(0, str(Path(__file__).parent))
 
-from src.chatterbox.tts import ChatterboxTTS
-# EnTokenizer is not needed - model has its own Vietnamese tokenizer
-# from src.chatterbox.models.tokenizers import EnTokenizer
+from viterbox.tts import Viterbox
+# Note: Viterbox is the main TTS class, not ChatterboxTTS
 
 
 def punc_norm(text: str) -> str:
@@ -127,7 +126,7 @@ def process_single_item(args):
         # Load model in this process (lazy loading)
         if not hasattr(process_single_item, 'model'):
             print(f"[Worker {idx%4}] Loading model on {device}...")
-            process_single_item.model = ChatterboxTTS.from_local(checkpoint_dir, device=device)
+            process_single_item.model = Viterbox.from_local(checkpoint_dir, device=device)
             process_single_item.config = config
             process_single_item.device = device
         
@@ -215,7 +214,7 @@ def main():
     parser.add_argument("--metadata_csv", type=str, required=True, help="Path to metadata CSV file")
     parser.add_argument("--audio_dir", type=str, required=True, help="Directory containing audio files")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for preprocessed files")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to ChatterboxTTS checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to Viterbox checkpoint")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of parallel workers (default: 1)")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use: cuda, cpu, or mps (default: cuda)")
     parser.add_argument("--start_idx", type=int, default=0, help="Start from this index (for resuming)")
@@ -280,7 +279,7 @@ def main():
     # Load config
     print(f"📦 Loading config from checkpoint...")
     try:
-        model = ChatterboxTTS.from_local(checkpoint_dir, device='cpu')
+        model = Viterbox.from_local(checkpoint_dir, device='cpu')
         config = {
             'start_text_token': model.t3.hp.start_text_token,
             'stop_text_token': model.t3.hp.stop_text_token,
