@@ -32,11 +32,12 @@ import numpy as np
 from multiprocessing import Pool, Manager
 import sys
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add parent directory to path (where src is located)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.chatterbox.tts import ChatterboxTTS
-from src.chatterbox.models.tokenizers import EnTokenizer
+# EnTokenizer is not needed - model has its own Vietnamese tokenizer
+# from src.chatterbox.models.tokenizers import EnTokenizer
 
 
 def punc_norm(text: str) -> str:
