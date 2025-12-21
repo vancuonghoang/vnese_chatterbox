@@ -103,6 +103,7 @@ def main():
     
     # Logging
     parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
+    parser.add_argument("--wandb_api_key", type=str, default=None, help="WandB API key (for Kaggle/Colab)")
     parser.add_argument("--wandb_project", type=str, default="vietnamese-tts")
     parser.add_argument("--wandb_run_name", type=str, default=None)
     
@@ -137,6 +138,9 @@ def main():
     if args.use_wandb:
         try:
             import wandb
+            # Login with API key if provided (for Kaggle/Colab)
+            if args.wandb_api_key:
+                wandb.login(key=args.wandb_api_key)
             wandb.init(
                 project=args.wandb_project,
                 name=args.wandb_run_name or f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
