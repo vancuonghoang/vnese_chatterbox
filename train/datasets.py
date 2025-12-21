@@ -284,8 +284,111 @@ class LengthGroupedSampler(Sampler):
                 yield idx
     
     def __len__(self) -> int:
-        return len(self.dataset)
+        return lengths
     
     def set_epoch(self, epoch: int):
         """Update seed for each epoch to ensure different shuffling."""
         self.generator.manual_seed(self.seed + epoch)
+
+
+# =============================================================================
+# PrecomputedDataset for loading .pt files
+# =============================================================================
+
+from pathlib import Path
+from torch.utils.data import Dataset
+
+class PrecomputedDataset(Dataset):
+    """
+    Fast dataset that loads pre-computed embeddings and tokens from .pt files
+    
+    Args:
+        preprocessed_dir: Directory containing .pt files from preprocess_dataset.py
+        preload_to_memory: If True, load all data to RAM at init (faster training)
+    """
+    
+    def __init__(
+        self,
+        preprocessed_dir: str,
+        preload_to_memory: bool = False,
+    ):
+        self.preprocessed_dir = Path(preprocessed_dir)
+        self.preload_to_memory = preload_to_memory
+        self._cached_data = None
+        
+        logger.info(f"🔍 Scanning preprocessed directory: {preprocessed_dir}")
+        
+        # Find all .pt files
+        all_files = list(self.preprocessed_dir.glob("*.pt"))
+        
+        # Filter out summary file and sort
+        self.data_files = sorted([f for f in all_files if 'summary' not in f.name])
+        
+        if len(self.data_files) == 0:
+            raise ValueError(f"❌ No .pt files found in {preprocessed_dir}")
+        
+        logger.info(f"📁 Found {len(self.data_files):,} preprocessed files")
+        
+        # Load and validate first sample
+        logger.info("🔬 Validating data format...")
+        sample = torch.load(self.data_files[0], weights_only=False)
+        required_keys = [
+            'text_tokens', 'text_token_lens',
+            'speech_tokens', 'speech_token_lens',
+            't3_cond_speaker_emb', 't3_cond_prompt_speech_tokens',
+            't3_cond_emotion_adv'
+        ]
+        missing_keys = [key for key in required_keys if key not in sample]
+        if missing_keys:
+            raise ValueError(f"Missing required keys: {missing_keys}")
+        
+        logger.info(f"✅ Data format validation passed")
+        
+        # Preload all data to memory if requested
+        if self.preload_to_memory:
+            logger.info(f"📥 Preloading {len(self.data_files):,} files to memory...")
+            self._cached_data = []
+            for data_file in self.data_files:
+                try:
+                    data = torch.load(data_file, weights_only=False)
+                    self._cached_data.append(data)
+                except Exception as e:
+                    logger.warning(f"⚠️ Error loading {data_file.name}: {e}")
+            logger.info(f"📦 Preloaded {len(self._cached_data):,} samples to memory")
+        
+        logger.info(f"🎉 PrecomputedDataset ready! ({len(self):,} samples)")
+    
+    def __len__(self):
+        if self._cached_data is not None:
+            return len(self._cached_data)
+        return len(self.data_files)
+    
+    def __getitem__(self, idx):
+        """
+        Load pre-computed data from .pt file or cache
+        
+        Returns:
+            Dictionary with all required fields for training
+        """
+        try:
+            # Use cached data if available
+            if self._cached_data is not None:
+                data = self._cached_data[idx]
+            else:
+                data_file = self.data_files[idx]
+                data = torch.load(data_file, weights_only=False)
+            
+            # Return in the format expected by training
+            return {
+                'text_tokens': data['text_tokens'],
+                'text_token_lens': data['text_token_lens'],
+                'speech_tokens': data['speech_tokens'],
+                'speech_token_lens': data['speech_token_lens'],
+                't3_cond_speaker_emb': data['t3_cond_speaker_emb'],
+                't3_cond_prompt_speech_tokens': data['t3_cond_prompt_speech_tokens'],
+                't3_cond_emotion_adv': data['t3_cond_emotion_adv'],
+            }
+            
+        except Exception as e:
+            logger.error(f"Error loading {self.data_files[idx]}: {e}")
+            return None

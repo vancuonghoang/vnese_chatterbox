@@ -43,7 +43,6 @@ sys.path.insert(0, str(TRAIN_PKG))
 
 try:
     from viterbox.tts import Viterbox, REPO_ID
-    from viterbox.utils.preprocessed_dataset import PrecomputedDataset
 except ImportError as e:
     print(f"❌ Critical Error: Could not import 'viterbox': {e}")
     print("Make sure you have installed the package: pip install -e .")
@@ -51,7 +50,7 @@ except ImportError as e:
 
 # Import from local package
 from loss import T3LossCalculator
-from datasets import SpeechDataCollator, LengthGroupedSampler
+from datasets import SpeechDataCollator, LengthGroupedSampler, PrecomputedDataset
 from trainer import (
     T3ForFineTuning, 
     SafeCheckpointTrainer, 
