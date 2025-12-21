@@ -224,16 +224,18 @@ def main():
     # LoRA (optional)
     if args.use_lora:
         try:
-            from peft import LoraConfig, get_peft_model, TaskType
+            from peft import LoraConfig, get_peft_model
+            # Don't use task_type - T3 uses LlamaModel (encoder only), not LlamaForCausalLM
             lora_config = LoraConfig(
                 r=args.lora_r,
                 lora_alpha=args.lora_alpha,
                 target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
                 lora_dropout=0.05,
                 bias="none",
-                task_type=TaskType.CAUSAL_LM,
+                # task_type removed - not needed for encoder-only T3 model
             )
-            t3_model.llama = get_peft_model(t3_model.llama, lora_config)
+            # Apply LoRA to the transformer backbone (tfmr, not llama)
+            t3_model.tfmr = get_peft_model(t3_model.tfmr, lora_config)
             trainable = sum(p.numel() for p in t3_model.parameters() if p.requires_grad)
             total = sum(p.numel() for p in t3_model.parameters())
             logger.info(f"✅ LoRA: {trainable:,} trainable / {total:,} total ({100*trainable/total:.2f}%)")

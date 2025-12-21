@@ -79,38 +79,38 @@ def create_lora_model(base_model, config: Optional[LoRAConfig] = None):
         config = LoRAConfig()
     
     try:
-        from peft import LoraConfig as PeftLoraConfig, get_peft_model, TaskType
+        from peft import LoraConfig as PeftLoraConfig, get_peft_model
     except ImportError:
         raise ImportError(
             "peft library required for LoRA. Install with: pip install peft"
         )
     
-    # Get the Llama backbone from T3
+    # Get the transformer backbone from T3
     if hasattr(base_model, "t3"):
         # T3ForFineTuning wrapper
-        llama = base_model.t3.llama
-    elif hasattr(base_model, "llama"):
+        tfmr = base_model.t3.tfmr
+    elif hasattr(base_model, "tfmr"):
         # Direct T3 model
-        llama = base_model.llama
+        tfmr = base_model.tfmr
     else:
-        raise ValueError("Could not find Llama backbone in model")
+        raise ValueError("Could not find transformer backbone in model")
     
-    # Create PEFT config
+    # Create PEFT config (no task_type - T3 uses encoder-only LlamaModel)
     peft_config = PeftLoraConfig(
         r=config.r,
         lora_alpha=config.lora_alpha,
         target_modules=config.target_modules,
         lora_dropout=config.lora_dropout,
         bias="none",
-        task_type=TaskType.CAUSAL_LM,
+        # task_type removed - not needed for encoder-only models
     )
     
-    # Apply LoRA to Llama backbone
-    lora_llama = get_peft_model(llama, peft_config)
+    # Apply LoRA to transformer backbone
+    lora_tfmr = get_peft_model(tfmr, peft_config)
     
     # Log trainable parameters
-    trainable_params = sum(p.numel() for p in lora_llama.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in lora_llama.parameters())
+    trainable_params = sum(p.numel() for p in lora_tfmr.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in lora_tfmr.parameters())
     logger.info(
         f"LoRA applied: {trainable_params:,} trainable / {total_params:,} total "
         f"({100 * trainable_params / total_params:.2f}%)"
@@ -118,9 +118,9 @@ def create_lora_model(base_model, config: Optional[LoRAConfig] = None):
     
     # Replace backbone
     if hasattr(base_model, "t3"):
-        base_model.t3.llama = lora_llama
+        base_model.t3.tfmr = lora_tfmr
     else:
-        base_model.llama = lora_llama
+        base_model.tfmr = lora_tfmr
     
     return base_model
 
@@ -138,11 +138,11 @@ def save_lora_weights(model, save_dir: str, save_name: str = "lora_adapter"):
     
     # Get the PEFT model
     if hasattr(model, "t3"):
-        peft_model = model.t3.llama
-    elif hasattr(model, "llama"):
-        peft_model = model.llama
+        peft_model = model.t3.tfmr
+    elif hasattr(model, "tfmr"):
+        peft_model = model.tfmr
     else:
-        raise ValueError("Could not find Llama backbone")
+        raise ValueError("Could not find transformer backbone")
     
     # Save adapter
     save_path = os.path.join(save_dir, save_name)
@@ -168,22 +168,22 @@ def load_lora_weights(model, adapter_path: str):
     except ImportError:
         raise ImportError("peft library required. Install with: pip install peft")
     
-    # Get the Llama backbone
+    # Get the transformer backbone
     if hasattr(model, "t3"):
-        llama = model.t3.llama
-    elif hasattr(model, "llama"):
-        llama = model.llama
+        tfmr = model.t3.tfmr
+    elif hasattr(model, "tfmr"):
+        tfmr = model.tfmr
     else:
-        raise ValueError("Could not find Llama backbone")
+        raise ValueError("Could not find transformer backbone")
     
     # Load adapter
-    peft_model = PeftModel.from_pretrained(llama, adapter_path)
+    peft_model = PeftModel.from_pretrained(tfmr, adapter_path)
     
     # Replace backbone
     if hasattr(model, "t3"):
-        model.t3.llama = peft_model
+        model.t3.tfmr = peft_model
     else:
-        model.llama = peft_model
+        model.tfmr = peft_model
     
     logger.info(f"LoRA adapter loaded from {adapter_path}")
     return model
@@ -203,20 +203,20 @@ def merge_lora_weights(model):
     """
     # Get the PEFT model
     if hasattr(model, "t3"):
-        peft_model = model.t3.llama
-    elif hasattr(model, "llama"):
-        peft_model = model.llama
+        peft_model = model.t3.tfmr
+    elif hasattr(model, "tfmr"):
+        peft_model = model.tfmr
     else:
-        raise ValueError("Could not find Llama backbone")
+        raise ValueError("Could not find transformer backbone")
     
     # Merge and unload
     merged = peft_model.merge_and_unload()
     
     # Replace backbone
     if hasattr(model, "t3"):
-        model.t3.llama = merged
+        model.t3.tfmr = merged
     else:
-        model.llama = merged
+        model.tfmr = merged
     
     logger.info("LoRA weights merged into base model")
     return model
