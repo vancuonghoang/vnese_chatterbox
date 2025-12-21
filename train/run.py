@@ -33,7 +33,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 
-# Add src to path (Repo Root)
+# Add parent directory to path (where viterbox package is)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -42,10 +42,11 @@ TRAIN_PKG = Path(__file__).resolve().parent
 sys.path.insert(0, str(TRAIN_PKG))
 
 try:
-    from src.chatterbox.tts import ChatterboxTTS, REPO_ID
-    from src.chatterbox.utils.preprocessed_dataset import PrecomputedDataset
-except ImportError:
-    print("❌ Critical Error: Could not import 'src.chatterbox'. Make sure you are running from the repo root.")
+    from viterbox.tts import Viterbox, REPO_ID
+    from viterbox.utils.preprocessed_dataset import PrecomputedDataset
+except ImportError as e:
+    print(f"❌ Critical Error: Could not import 'viterbox': {e}")
+    print("Make sure you have installed the package: pip install -e .")
     sys.exit(1)
 
 # Import from local package
@@ -73,7 +74,7 @@ def main():
     
     # Model
     parser.add_argument("--checkpoint", type=str, default=None,
-                        help="ChatterboxTTS checkpoint directory")
+                        help="Viterbox checkpoint directory")
     parser.add_argument("--tokenizer_path", type=str, default="VietnameseTokenizer/tokenizer.json",
                         help="Vietnamese tokenizer path")
     
@@ -179,7 +180,7 @@ def main():
         logger.info(f"✅ Split: {train_size} train, {val_size} val")
     
     # Load model
-    logger.info("Loading ChatterboxTTS model...")
+    logger.info("Loading Viterbox model...")
     checkpoint_dir = args.checkpoint
     if not checkpoint_dir:
         # Download from HuggingFace
@@ -199,14 +200,14 @@ def main():
         if not target.exists():
             shutil.copy(args.tokenizer_path, target)
     
-    chatterbox = ChatterboxTTS.from_local(str(checkpoint_dir), device="cpu")
-    t3_model = chatterbox.t3
+    viterbox = Viterbox.from_local(str(checkpoint_dir), device="cpu")
+    t3_model = viterbox.t3
     t3_config = t3_model.hp
     
     # Freeze encoder/decoder
-    for p in chatterbox.ve.parameters():
+    for p in viterbox.ve.parameters():
         p.requires_grad = False
-    for p in chatterbox.s3gen.parameters():
+    for p in viterbox.s3gen.parameters():
         p.requires_grad = False
     for p in t3_model.parameters():
         p.requires_grad = True

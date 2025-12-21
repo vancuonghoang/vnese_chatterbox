@@ -8,7 +8,7 @@ Hướng dẫn training model Chatterbox TTS cho tiếng Việt sử dụng lu�
 graph LR
     A[Metadata CSV] --> B[preprocess_dataset.py]
     B --> C[Dataset đã xử lý (.pt files)]
-    C --> D[train_precomputed.py]
+    C --> D[train/run.py]
     D --> E[Checkpoints]
 ```
 
@@ -47,7 +47,7 @@ wavs/audio_002.wav|Hôm nay trời đẹp quá.
 
 Chạy script này để tính toán trước embeddings và tokens. Bước này giúp training nhanh hơn 5-10 lần.
 
-**Chạy với GPU (Khuyên dùng - Nhanh nhất):**
+**Chạy với GPU (Khuyên dùng - Nhanh nhất với batching):**
 ```bash
 python preprocess_dataset.py \
     --metadata_csv metadata.csv \
@@ -55,6 +55,7 @@ python preprocess_dataset.py \
     --output_dir ./preprocessed \
     --checkpoint ./vietnamese/pretrained_model_download \
     --device cuda \
+    --batch_size 16 \
     --num_workers 1
 ```
 
@@ -62,20 +63,23 @@ python preprocess_dataset.py \
 - `--metadata_csv`: Đường dẫn file metadata.
 - `--audio_dir`: Thư mục chứa file audio.
 - `--output_dir`: Thư mục lưu file `.pt` đã xử lý.
+- `--batch_size`: Batch size cho GPU (default: 1, recommended: 8-16 cho GPU).
 - `--num_workers`: Số luồng xử lý (Dùng 1 cho GPU để tránh OOM, dùng 4-8 cho CPU).
 
 ---
 
 ## 4. Bước 2: Training
 
-Sử dụng `train_precomputed.py` để training từ dữ liệu đã xử lý.
+Sử dụng `train/run.py` để training từ dữ liệu đã xử lý.
+
+> **Lưu ý**: Script training nằm ở `train/run.py` (không phải `train_precomputed.py`)
 
 ### Cách 1: Fine-tuning tiêu chuẩn (Full Model)
 
 Dành cho dataset lớn (>10h) hoặc khi cần chất lượng cao nhất.
 
 ```bash
-python train_precomputed.py \
+python train/run.py \
     --preprocessed_dir ./preprocessed \
     --output_dir ./checkpoints/vietnamese_full \
     --epochs 20 \
@@ -89,7 +93,7 @@ python train_precomputed.py \
 Tối ưu cho dataset nhỏ, train nhanh và nhẹ (chạy tốt trên T4 GPU 16GB).
 
 ```bash
-python train_precomputed.py \
+python train/run.py \
     --preprocessed_dir ./preprocessed \
     --output_dir ./checkpoints/vietnamese_lora \
     --epochs 10 \
