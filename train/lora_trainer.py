@@ -229,7 +229,7 @@ def get_lora_training_args(config: Optional[LoRAConfig] = None, output_dir: str 
     if config is None:
         config = LoRAConfig()
     
-    from .trainer import T3TrainingArguments
+    from trainer import T3TrainingArguments
     
     return T3TrainingArguments(
         output_dir=output_dir,
