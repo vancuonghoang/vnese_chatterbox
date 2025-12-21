@@ -284,7 +284,7 @@ class LengthGroupedSampler(Sampler):
                 yield idx
     
     def __len__(self) -> int:
-        return lengths
+        return len(self.dataset)
     
     def set_epoch(self, epoch: int):
         """Update seed for each epoch to ensure different shuffling."""

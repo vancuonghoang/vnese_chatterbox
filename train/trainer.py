@@ -260,18 +260,18 @@ class SafeCheckpointTrainer(Trainer):
         self.use_dynamic_batching = use_dynamic_batching
         self.bucket_size_multiplier = bucket_size_multiplier
     
-    def _get_train_sampler(self):
+    def _get_train_sampler(self, train_dataset):
         """Override to use LengthGroupedSampler when enabled."""
         if not self.use_dynamic_batching:
-            return super()._get_train_sampler()
+            return super()._get_train_sampler(train_dataset)
         
-        if self.train_dataset is None:
+        if train_dataset is None:
             return None
         
         logger.info("Using LengthGroupedSampler for dynamic batching")
         
         return LengthGroupedSampler(
-            dataset=self.train_dataset,
+            dataset=train_dataset,
             batch_size=self.args.per_device_train_batch_size,
             shuffle=True,
             seed=self.args.seed,
