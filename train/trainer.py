@@ -164,9 +164,12 @@ class T3ForFineTuning(nn.Module):
             labels_speech=labels_speech,
         )
         
-        # Store for logging
+        # Store ALL loss components for detailed logging
+        self.last_loss_dict = loss_dict
         self.last_loss_text = loss_dict.get("loss_text", torch.tensor(0.0))
         self.last_loss_speech = loss_dict.get("loss_speech", torch.tensor(0.0))
+        self.last_z_loss = loss_dict.get("z_loss", torch.tensor(0.0))
+        self.last_total_loss = loss_dict.get("total_loss", total_loss)
         
         return total_loss, out.speech_logits
 
@@ -286,11 +289,42 @@ class SafeCheckpointTrainer(Trainer):
         # Forward pass
         loss, outputs = model(**inputs)
         
-        # Log component losses
-        if hasattr(model, "last_loss_text") and model.last_loss_text is not None:
-            self._log_custom_metric("train/loss_text", model.last_loss_text)
-        if hasattr(model, "last_loss_speech") and model.last_loss_speech is not None:
-            self._log_custom_metric("train/loss_speech", model.last_loss_speech)
+        # Log ALL component losses to WandB
+        if hasattr(model, "last_loss_dict") and model.last_loss_dict is not None:
+            loss_dict = model.last_loss_dict
+            
+            if "loss_text" in loss_dict:
+                self._log_custom_metric("train/loss_text", loss_dict["loss_text"])
+            if "loss_speech" in loss_dict:
+                self._log_custom_metric("train/loss_speech", loss_dict["loss_speech"])
+            if "z_loss" in loss_dict:
+                self._log_custom_metric("train/z_loss", loss_dict["z_loss"])
+            if "total_loss" in loss_dict:
+                self._log_custom_metric("train/total_loss", loss_dict["total_loss"])
+            
+            # Terminal logging every N steps
+            if self.state.global_step % self.args.logging_steps == 0:
+                loss_text_val = loss_dict.get("loss_text", 0.0)
+                loss_speech_val = loss_dict.get("loss_speech", 0.0)
+                z_loss_val = loss_dict.get("z_loss", 0.0)
+                total_loss_val = loss_dict.get("total_loss", loss)
+                
+                if torch.is_tensor(loss_text_val):
+                    loss_text_val = loss_text_val.item()
+                if torch.is_tensor(loss_speech_val):
+                    loss_speech_val = loss_speech_val.item()
+                if torch.is_tensor(z_loss_val):
+                    z_loss_val = z_loss_val.item()
+                if torch.is_tensor(total_loss_val):
+                    total_loss_val = total_loss_val.item()
+                
+                logger.info(
+                    f"📊 Step {self.state.global_step} | "
+                    f"Total: {total_loss_val:.4f} | "
+                    f"Text: {loss_text_val:.4f} | "
+                    f"Speech: {loss_speech_val:.4f} | "
+                    f"ZLoss: {z_loss_val:.6f}"
+                )
         
         return (loss, outputs) if return_outputs else loss
     

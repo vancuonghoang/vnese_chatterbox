@@ -289,8 +289,14 @@ def main():
     collator = SpeechDataCollator(speech_cond_prompt_len=t3_config.speech_cond_prompt_len)
     
     # Callbacks
+    from train.vietnamese_eval_callback import VietnameseEvalCallback
     callbacks = [
         ResumeVerificationCallback(),  # Logs resume details
+        VietnameseEvalCallback(
+            viterbox_base=viterbox,
+            output_dir=args.output_dir,
+            upload_to_wandb=args.use_wandb
+        )
     ]
     
     # Trainer
