@@ -51,9 +51,119 @@ def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
     print(f"\n✅ All tests completed! Results saved to: {output_dir}")
 
 
+def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
+    """
+    Load model with hybrid strategy:
+    1. Load base components (S3Gen, VE, Tokenizer) from HuggingFace
+    2. If model_path provided:
+       - Load T3 weights from checkpoint
+       - Apply LoRA adapters if present
+    """
+    from huggingface_hub import snapshot_download
+    from safetensors.torch import load_file as load_safetensors
+    import torch
+    
+    print("📥 Loading base components from HuggingFace Hub...")
+    base_ckpt_dir = Path(
+        snapshot_download(
+            repo_id="dolly-vn/viterbox",
+            repo_type="model",
+            revision="main",
+            allow_patterns=[
+                "ve.pt",
+                "s3gen.pt",
+                "tokenizer_vi_expanded.json",
+                "conds.pt",
+                "t3_ml24ls_v2.safetensors", # Fallback base T3
+            ],
+        )
+    )
+    
+    # Load base model first
+    tts = Viterbox.from_local(base_ckpt_dir, device=device)
+    
+    if model_path:
+        ckpt_path = Path(model_path)
+        print(f"🔄 Overriding with local checkpoint: {ckpt_path}")
+        
+        # Case 1: LoRA Adapter
+        if (ckpt_path / "adapter_config.json").exists():
+            print("  ✨ Detected LoRA adapter")
+            try:
+                from peft import PeftModel, PeftConfig
+                
+                # Load configuration
+                config = PeftConfig.from_pretrained(str(ckpt_path))
+                
+                # We need to wrap the internal transformer (t3.tfmr)
+                # Note: viterbox.tts.py loads T3, which has .tfmr (LlamaModel)
+                
+                # Apply LoRA
+                print("  Applying LoRA adapters to T3 backbone...")
+                tts.t3.tfmr = PeftModel.from_pretrained(tts.t3.tfmr, str(ckpt_path))
+                tts.t3.to(device)
+                
+                print("  ✅ LoRA adapters merged successfully")
+            except ImportError:
+                print("  ⚠️ PEFT library not found. Cannot load LoRA adapter.")
+            except Exception as e:
+                print(f"  ❌ Failed to load LoRA: {e}")
+                
+        # Case 2: Full Finetune (safetensors)
+        # Check for model.safetensors or t3_model.safetensors or pytorch_model.bin
+        elif (ckpt_path / "model.safetensors").exists() or \
+             (ckpt_path / "t3_model.safetensors").exists() or \
+             (ckpt_path / "pytorch_model.bin").exists():
+             
+            print("  📦 Detected full fine-tuned weights")
+            
+            # Find the weight file
+            if (ckpt_path / "model.safetensors").exists():
+                w_path = ckpt_path / "model.safetensors"
+            elif (ckpt_path / "t3_model.safetensors").exists():
+                w_path = ckpt_path / "t3_model.safetensors"
+            else:
+                w_path = ckpt_path / "pytorch_model.bin"
+                
+            try:
+                if str(w_path).endswith(".safetensors"):
+                    state_dict = load_safetensors(w_path)
+                else:
+                    state_dict = torch.load(w_path, map_location="cpu", weights_only=True)
+                
+                # Handle prefixes from Trainer (e.g. "t3.tfmr..." -> "tfmr...")
+                # The Viterbox T3 model expects keys relative to T3 class
+                
+                # Helper to clean keys
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    # Remove "module." if from DDP
+                    if k.startswith("module."):
+                        k = k[7:]
+                    
+                    # Remove "t3." prefix if saved from Viterbox wrapper
+                    if k.startswith("t3."):
+                        k = k[3:]
+                    
+                    new_state_dict[k] = v
+                
+                # Load into T3
+                missing, unexpected = tts.t3.load_state_dict(new_state_dict, strict=False)
+                
+                if len(unexpected) > 0:
+                    print(f"  ⚠️ Unexpected keys: {unexpected[:5]}...")
+                
+                print(f"  ✅ Loaded weights from {w_path.name}")
+                
+            except Exception as e:
+                print(f"  ❌ Failed to load weights: {e}")
+        
+    return tts
+
+
 def main():
     parser = argparse.ArgumentParser(description="Viterbox Text-to-Speech")
-    parser.add_argument("--model_path", "-m", type=str, default=None, help="Path to local model checkpoint (optional)")
+    parser.add_argument("--model_path", "-m", type=str, default=None, help="Path to local checkpoint (LoRA or Full)")
     parser.add_argument("--text", "-t", type=str, help="Text to synthesize (ignored if --test-cases is used)")
     parser.add_argument("--test-cases", action="store_true", help="Run full Vietnamese test suite instead of single text")
     parser.add_argument("--lang", "-l", type=str, default="vi", help="Language (vi/en)")
@@ -72,15 +182,12 @@ def main():
     
     print(f"Loading model on {args.device}...")
     try:
-        if args.model_path:
-            print(f"Loading from local path: {args.model_path}")
-            tts = Viterbox.from_local(args.model_path, device=args.device)
-        else:
-            print("Loading from HuggingFace Hub...")
-            tts = Viterbox.from_pretrained(args.device)
+        tts = load_model_hybrid(args.device, args.model_path)
         print("✅ Model loaded successfully")
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     # Check reference audio
