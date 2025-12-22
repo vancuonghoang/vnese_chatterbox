@@ -24,7 +24,7 @@ def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
     for group_name, prompts in TEST_CASES.items():
         group_clean = group_name.lower().replace(" ", "_").replace(":", "")
         group_dir = out_path / group_clean
-        group_dir.mkdir(exist_ok=True)
+        group_dir.mkdir(parents=True, exist_ok=True)  # ✅ Fix: Create parent directories
         
         print(f"\n📂 Group: {group_name}")
         
@@ -39,12 +39,18 @@ def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
                     temperature=0.1,
                 )
                 
+                # ✅ Check if audio is None or empty
+                if audio is None or audio.numel() == 0:
+                    print(f"  ⚠️ Skipped: Empty audio generated")
+                    continue
+                
                 # Sanitize filename
                 safe_text = "".join(c for c in text[:30] if c.isalnum() or c in "._- ")
                 safe_text = safe_text.replace(" ", "_")
                 filename = f"{i}_{safe_text}.wav"
                 
                 tts.save_audio(audio, group_dir / filename)
+                print(f"  ✅ Saved: {filename}")
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
     
