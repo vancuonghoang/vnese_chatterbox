@@ -88,6 +88,42 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
     # Load base model first
     tts = Viterbox.from_local(base_ckpt_dir, device=device)
     
+    # ✅ CRITICAL FIX: Resize embeddings to match tokenizer
+    tokenizer_vocab = tts.tokenizer.text_dict_size
+    model_vocab = tts.t3.tfmr.embed_tokens.num_embeddings
+    
+    print(f"\n🔍 Checking vocab sizes...")
+    print(f"  Tokenizer vocab: {tokenizer_vocab}")
+    print(f"  Model embedding: {model_vocab}")
+    
+    if tokenizer_vocab != model_vocab:
+        print(f"  ⚠️ Vocab size MISMATCH detected!")
+        print(f"  🔧 Resizing T3 embeddings: {model_vocab} → {tokenizer_vocab}")
+        
+        # Resize token embeddings
+        tts.t3.tfmr.resize_token_embeddings(tokenizer_vocab)
+        
+        # Also resize output embeddings (lm_head)
+        old_lm_head = tts.t3.speech_head
+        new_lm_head = torch.nn.Linear(
+            old_lm_head.in_features,
+            tokenizer_vocab,
+            bias=False,
+            device=device
+        )
+        # Copy old weights
+        with torch.no_grad():
+            new_lm_head.weight[:model_vocab] = old_lm_head.weight[:model_vocab]
+            # Initialize new tokens randomly
+            if tokenizer_vocab > model_vocab:
+                torch.nn.init.normal_(new_lm_head.weight[model_vocab:], mean=0.0, std=0.02)
+        
+        tts.t3.speech_head = new_lm_head
+        
+        print(f"  ✅ Embeddings resized successfully!")
+    else:
+        print(f"  ✅ Vocab sizes match, no resize needed")
+    
     if model_path:
         ckpt_path = Path(model_path)
         print(f"🔄 Overriding with local checkpoint: {ckpt_path}")
@@ -185,8 +221,17 @@ def main():
     parser.add_argument("--cfg-weight", type=float, default=0.7, help="CFG weight (0.0-1.0), higher is more stable")
     parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature (0.1-1.0), lower is more stable")
     parser.add_argument("--sentence-pause", type=float, default=0.5, help="Pause between sentences in seconds (default 0.5)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
+    
+    # Setup logging
+    import logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
     if not args.text and not args.test_cases:
         parser.error("Either --text or --test-cases must be provided")
@@ -195,6 +240,16 @@ def main():
     try:
         tts = load_model_hybrid(args.device, args.model_path)
         print("✅ Model loaded successfully")
+        
+        # 🔍 Debug: Print model info
+        print(f"\n📊 Model Info:")
+        print(f"  Tokenizer vocab size: {tts.tokenizer.text_dict_size}")
+        print(f"  T3 embedding size: {tts.t3.tfmr.embed_tokens.num_embeddings}")
+        if tts.tokenizer.text_dict_size != tts.t3.tfmr.embed_tokens.num_embeddings:
+            print(f"  ⚠️ WARNING: Vocab size mismatch! This may cause issues.")
+        else:
+            print(f"  ✅ Vocab sizes match!")
+        
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
         import traceback

@@ -213,6 +213,12 @@ class S3Token2Mel(torch.nn.Module):
             finalize=finalize,
             **ref_dict,
         )
+        
+        # ✅ Safety check
+        if output_mels is None:
+            logging.warning("Flow inference returned None")
+            return None
+        
         return output_mels
 
 
@@ -280,6 +286,11 @@ class S3Token2Wav(S3Token2Mel):
 
     @torch.inference_mode()
     def hift_inference(self, speech_feat, cache_source: torch.Tensor = None):
+        # ✅ Safety check
+        if speech_feat is None:
+            logging.warning("HiFT inference received None speech_feat")
+            return None, None
+        
         if cache_source is None:
             cache_source = torch.zeros(1, 1, 0).to(self.device)
         return self.mel2wav.inference(speech_feat=speech_feat, cache_source=cache_source)
@@ -297,7 +308,18 @@ class S3Token2Wav(S3Token2Mel):
         finalize: bool = True,
     ):
         output_mels = self.flow_inference(speech_tokens, ref_wav=ref_wav, ref_sr=ref_sr, ref_dict=ref_dict, finalize=finalize)
+        
+        # ✅ Safety check for None output_mels
+        if output_mels is None:
+            logging.warning("Flow inference returned None, cannot generate audio")
+            return None, None
+        
         output_wavs, output_sources = self.hift_inference(output_mels, cache_source)
+        
+        # ✅ Safety check for None output_wavs
+        if output_wavs is None:
+            logging.warning("HiFT inference returned None, cannot generate audio")
+            return None, None
 
         # NOTE: ad-hoc method to reduce "spillover" from the reference clip.
         output_wavs[:, :len(self.trim_fade)] *= self.trim_fade

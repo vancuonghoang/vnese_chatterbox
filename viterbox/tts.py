@@ -591,18 +591,37 @@ class Viterbox:
                 logger.warning(f"Generated empty speech tokens for: {text[:50]}")
                 return None
             
+            logger.debug(f"Speech tokens shape: {speech_tokens.shape}, device: {speech_tokens.device}")
+            logger.debug(f"Conds.s3 keys: {self.conds.s3.keys() if self.conds.s3 else 'None'}")
+            
             # Generate waveform with S3Gen
             wav, _ = self.s3gen.inference(
                 speech_tokens=speech_tokens,
                 ref_dict=self.conds.s3,
             )
             
+            logger.debug(f"S3Gen output - wav type: {type(wav)}, wav is None: {wav is None}")
+            
             # ✅ Check if wav is None or empty
-            if wav is None or wav.numel() == 0:
-                logger.warning(f"S3Gen returned empty audio for: {text[:50]}")
+            if wav is None:
+                logger.warning(f"S3Gen returned None for: {text[:50]}")
                 return None
             
-            return wav[0].cpu().numpy()
+            if not torch.is_tensor(wav):
+                logger.error(f"S3Gen returned non-tensor: {type(wav)}")
+                return None
+            
+            if wav.numel() == 0:
+                logger.warning(f"S3Gen returned empty tensor for: {text[:50]}")
+                return None
+            
+            logger.debug(f"Wav shape before indexing: {wav.shape}")
+            
+            # Extract first batch item
+            wav_numpy = wav[0].cpu().numpy()
+            logger.debug(f"Wav numpy shape: {wav_numpy.shape}, dtype: {wav_numpy.dtype}")
+            
+            return wav_numpy
             
         except Exception as e:
             logger.error(f"Generation failed for '{text[:50]}': {e}")
