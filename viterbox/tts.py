@@ -4,6 +4,7 @@ Based on Chatterbox architecture, fine-tuned for Vietnamese.
 """
 import os
 import re
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +16,9 @@ from typing import Optional, Union, List
 
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file as load_safetensors
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 from .models.t3 import T3, T3Config
 from .models.t3.modules.cond_enc import T3Cond
