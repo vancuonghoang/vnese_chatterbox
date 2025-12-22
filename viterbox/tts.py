@@ -4,7 +4,6 @@ Based on Chatterbox architecture, fine-tuned for Vietnamese.
 """
 import os
 import re
-import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,9 +15,6 @@ from typing import Optional, Union, List
 
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file as load_safetensors
-
-# Setup logger
-logger = logging.getLogger(__name__)
 
 from .models.t3 import T3, T3Config
 from .models.t3.modules.cond_enc import T3Cond
@@ -550,82 +546,52 @@ class Viterbox:
         temperature: float,
         top_p: float,
         repetition_penalty: float,
-    ) -> Optional[np.ndarray]:  # ✅ Return Optional
-        """Generate speech for a single sentence. Returns None if generation fails."""
-        try:
-            # Tokenize text with language prefix
-            text_tokens = self.tokenizer.text_to_tokens(text, language_id=language).to(self.device)
-            
-            # Duplicate for CFG (classifier-free guidance needs two sequences)
-            text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
-            
-            # Add start and stop tokens
-            sot = self.t3.hp.start_text_token
-            eot = self.t3.hp.stop_text_token
-            text_tokens = F.pad(text_tokens, (1, 0), value=sot)
-            text_tokens = F.pad(text_tokens, (0, 1), value=eot)
+    ) -> np.ndarray:
+        """Generate speech for a single sentence."""
+        # Tokenize text with language prefix
+        text_tokens = self.tokenizer.text_to_tokens(text, language_id=language).to(self.device)
+        
+        # Duplicate for CFG (classifier-free guidance needs two sequences)
+        text_tokens = torch.cat([text_tokens, text_tokens], dim=0)
+        
+        # Add start and stop tokens
+        sot = self.t3.hp.start_text_token
+        eot = self.t3.hp.stop_text_token
+        text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+        text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
-            # Automatically detect device type to enable Autocast accordingly
-            use_autocast = self.device in ['cuda', 'mps']
-            device_type = 'cuda' if self.device == 'cuda' else 'mps'
+        # Automatically detect device type to enable Autocast accordingly
+        use_autocast = self.device in ['cuda', 'mps']
+        device_type = 'cuda' if self.device == 'cuda' else 'mps'
 
-            with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=(self.device==use_autocast)):
-                # Generate speech tokens with T3
-                speech_tokens = self.t3.inference(
-                    t3_cond=self.conds.t3,
-                    text_tokens=text_tokens,
-                    max_new_tokens=600,
-                    temperature=temperature,
-                    cfg_weight=cfg_weight,
-                    repetition_penalty=repetition_penalty,
-                    top_p=top_p,
-                )
-                
-                # Extract only the conditional batch and filter invalid tokens
-                speech_tokens = speech_tokens[0]
-                speech_tokens = drop_invalid_tokens(speech_tokens)
-                speech_tokens = speech_tokens.to(self.device)
-            
-            # ✅ Check if speech_tokens is empty
-            if speech_tokens.numel() == 0:
-                logger.warning(f"Generated empty speech tokens for: {text[:50]}")
-                return None
-            
-            logger.debug(f"Speech tokens shape: {speech_tokens.shape}, device: {speech_tokens.device}")
-            logger.debug(f"Conds.s3 keys: {self.conds.s3.keys() if self.conds.s3 else 'None'}")
-            
-            # Generate waveform with S3Gen
-            wav, _ = self.s3gen.inference(
-                speech_tokens=speech_tokens,
-                ref_dict=self.conds.s3,
+        with torch.inference_mode(), torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=(self.device==use_autocast)):
+            # Generate speech tokens with T3
+            speech_tokens = self.t3.inference(
+                t3_cond=self.conds.t3,
+                text_tokens=text_tokens,
+                max_new_tokens=600,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                repetition_penalty=repetition_penalty,
+                top_p=top_p,
             )
             
-            logger.debug(f"S3Gen output - wav type: {type(wav)}, wav is None: {wav is None}")
+            # Check if inference returned None (model may have failed)
+            if speech_tokens is None:
+                raise RuntimeError("T3 inference returned None - model weights may not be loaded correctly")
             
-            # ✅ Check if wav is None or empty
-            if wav is None:
-                logger.warning(f"S3Gen returned None for: {text[:50]}")
-                return None
-            
-            if not torch.is_tensor(wav):
-                logger.error(f"S3Gen returned non-tensor: {type(wav)}")
-                return None
-            
-            if wav.numel() == 0:
-                logger.warning(f"S3Gen returned empty tensor for: {text[:50]}")
-                return None
-            
-            logger.debug(f"Wav shape before indexing: {wav.shape}")
-            
-            # Extract first batch item
-            wav_numpy = wav[0].cpu().numpy()
-            logger.debug(f"Wav numpy shape: {wav_numpy.shape}, dtype: {wav_numpy.dtype}")
-            
-            return wav_numpy
-            
-        except Exception as e:
-            logger.error(f"Generation failed for '{text[:50]}': {e}")
-            return None
+            # Extract only the conditional batch and filter invalid tokens
+            speech_tokens = speech_tokens[0]
+            speech_tokens = drop_invalid_tokens(speech_tokens)
+            speech_tokens = speech_tokens.to(self.device)
+        
+        # Generate waveform with S3Gen
+        wav, _ = self.s3gen.inference(
+            speech_tokens=speech_tokens,
+            ref_dict=self.conds.s3,
+        )
+        
+        return wav[0].cpu().numpy()
     
     def generate(
         self,
@@ -698,11 +664,6 @@ class Viterbox:
                     repetition_penalty=repetition_penalty,
                 )
                 
-                # ✅ Skip if generation failed
-                if audio_np is None:
-                    logger.warning(f"Skipped sentence {i+1}: generation failed")
-                    continue
-                
                 # Trim silence from each segment
                 audio_np = trim_silence(audio_np, self.sr, top_db=30)
                 
@@ -714,7 +675,6 @@ class Viterbox:
                 merged = crossfade_concat(audio_segments, self.sr, fade_ms=crossfade_ms, pause_ms=sentence_pause_ms)
                 return torch.from_numpy(merged).unsqueeze(0)
             else:
-                logger.warning("All sentences failed to generate, returning silence")
                 return torch.zeros(1, self.sr)  # 1 second of silence as fallback
         else:
             # Single generation without splitting
@@ -726,12 +686,6 @@ class Viterbox:
                 top_p=top_p,
                 repetition_penalty=repetition_penalty,
             )
-            
-            # ✅ Handle None return
-            if audio_np is None:
-                logger.warning("Single sentence generation failed, returning silence")
-                return torch.zeros(1, self.sr)
-            
             return torch.from_numpy(audio_np).unsqueeze(0)
     
     def save_audio(

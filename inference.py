@@ -6,6 +6,29 @@ from pathlib import Path
 from viterbox import Viterbox
 
 
+def _sanitize_path(name: str) -> str:
+    """
+    Sanitize a string to be safe for use as directory/file name.
+    Removes or replaces characters that are problematic for file systems.
+    """
+    import re
+    # Replace / and \ with underscore
+    name = name.replace("/", "_").replace("\\", "_")
+    # Replace : with empty (for "Group 1:" style names)
+    name = name.replace(":", "")
+    # Replace spaces with underscores
+    name = name.replace(" ", "_")
+    # Remove any other non-alphanumeric characters except _ and -
+    name = re.sub(r'[^\w\-]', '', name)
+    # Collapse multiple underscores
+    name = re.sub(r'_+', '_', name)
+    # Strip leading/trailing underscores
+    name = name.strip('_')
+    # Lowercase
+    name = name.lower()
+    return name
+
+
 def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
     """Run all test cases from vietnamese_test_cases.py"""
     try:
@@ -22,9 +45,10 @@ def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
     print(f"🚀 Running {len(TEST_CASES)} test groups...")
     
     for group_name, prompts in TEST_CASES.items():
-        group_clean = group_name.lower().replace(" ", "_").replace(":", "")
+        # Properly sanitize group name to avoid path issues
+        group_clean = _sanitize_path(group_name)
         group_dir = out_path / group_clean
-        group_dir.mkdir(parents=True, exist_ok=True)  # ✅ Fix: Create parent directories
+        group_dir.mkdir(parents=True, exist_ok=True)  # parents=True for nested paths
         
         print(f"\n📂 Group: {group_name}")
         
@@ -39,22 +63,103 @@ def run_test_cases(tts: Viterbox, output_dir: str, ref_audio: str = None):
                     temperature=0.1,
                 )
                 
-                # ✅ Check if audio is None or empty
-                if audio is None or audio.numel() == 0:
-                    print(f"  ⚠️ Skipped: Empty audio generated")
-                    continue
-                
                 # Sanitize filename
-                safe_text = "".join(c for c in text[:30] if c.isalnum() or c in "._- ")
-                safe_text = safe_text.replace(" ", "_")
+                safe_text = _sanitize_path(text[:30])
                 filename = f"{i}_{safe_text}.wav"
                 
                 tts.save_audio(audio, group_dir / filename)
-                print(f"  ✅ Saved: {filename}")
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
     
     print(f"\n✅ All tests completed! Results saved to: {output_dir}")
+
+
+def _is_lora_checkpoint(state_dict: dict) -> bool:
+    """
+    Check if state_dict contains LoRA weights.
+    LoRA keys have patterns like: 'lora_A.default.weight', 'lora_B.default.weight', 'base_layer.weight'
+    """
+    for key in state_dict.keys():
+        if 'lora_A' in key or 'lora_B' in key or 'base_layer' in key:
+            return True
+    return False
+
+
+def _merge_lora_weights(state_dict: dict, lora_alpha: int = 16, lora_r: int = 8) -> dict:
+    """
+    Merge LoRA weights (base_layer + lora_A @ lora_B * scaling) into standard weights.
+    
+    LoRA formula: W = W_base + (lora_B @ lora_A) * (alpha / r)
+    
+    Args:
+        state_dict: State dict with LoRA keys
+        lora_alpha: LoRA alpha (scaling numerator), default 16
+        lora_r: LoRA rank, default 8
+    
+    Returns:
+        Merged state dict with standard weight names
+    """
+    import re
+    
+    merged = {}
+    lora_groups = {}  # Group by base key: {base_key: {base, lora_A, lora_B}}
+    
+    scaling = lora_alpha / lora_r
+    
+    for key, value in state_dict.items():
+        # Identify LoRA-related keys
+        # Pattern: some.module.base_layer.weight, some.module.lora_A.default.weight
+        
+        if '.base_layer.' in key:
+            # Extract base key: some.module.base_layer.weight -> some.module
+            base_key = key.replace('.base_layer.weight', '').replace('.base_layer.bias', '')
+            suffix = 'weight' if 'weight' in key else 'bias'
+            
+            if base_key not in lora_groups:
+                lora_groups[base_key] = {}
+            lora_groups[base_key][f'base_{suffix}'] = value
+            
+        elif '.lora_A.' in key:
+            # some.module.lora_A.default.weight -> some.module
+            base_key = re.sub(r'\.lora_A\.[^.]+\.weight$', '', key)
+            if base_key not in lora_groups:
+                lora_groups[base_key] = {}
+            lora_groups[base_key]['lora_A'] = value
+            
+        elif '.lora_B.' in key:
+            # some.module.lora_B.default.weight -> some.module
+            base_key = re.sub(r'\.lora_B\.[^.]+\.weight$', '', key)
+            if base_key not in lora_groups:
+                lora_groups[base_key] = {}
+            lora_groups[base_key]['lora_B'] = value
+            
+        else:
+            # Non-LoRA key, keep as-is
+            merged[key] = value
+    
+    # Now merge each LoRA group
+    for base_key, components in lora_groups.items():
+        if 'base_weight' in components:
+            base_weight = components['base_weight']
+            
+            # Check if we have LoRA components
+            if 'lora_A' in components and 'lora_B' in components:
+                lora_A = components['lora_A']  # Shape: (r, in_features)
+                lora_B = components['lora_B']  # Shape: (out_features, r)
+                
+                # Merge: W = W_base + (B @ A) * scaling
+                delta = (lora_B @ lora_A) * scaling
+                merged_weight = base_weight + delta
+                
+                merged[f'{base_key}.weight'] = merged_weight
+            else:
+                # No LoRA, just use base
+                merged[f'{base_key}.weight'] = base_weight
+        
+        if 'base_bias' in components:
+            merged[f'{base_key}.bias'] = components['base_bias']
+    
+    return merged
 
 
 def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
@@ -63,7 +168,7 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
     1. Load base components (S3Gen, VE, Tokenizer) from HuggingFace
     2. If model_path provided:
        - Load T3 weights from checkpoint
-       - Apply LoRA adapters if present
+       - Apply LoRA adapters if present (auto-detect and merge)
     """
     from huggingface_hub import snapshot_download
     from safetensors.torch import load_file as load_safetensors
@@ -88,49 +193,13 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
     # Load base model first
     tts = Viterbox.from_local(base_ckpt_dir, device=device)
     
-    # ✅ CRITICAL FIX: Resize embeddings to match tokenizer
-    tokenizer_vocab = tts.tokenizer.text_dict_size
-    model_vocab = tts.t3.tfmr.embed_tokens.num_embeddings
-    
-    print(f"\n🔍 Checking vocab sizes...")
-    print(f"  Tokenizer vocab: {tokenizer_vocab}")
-    print(f"  Model embedding: {model_vocab}")
-    
-    if tokenizer_vocab != model_vocab:
-        print(f"  ⚠️ Vocab size MISMATCH detected!")
-        print(f"  🔧 Resizing T3 embeddings: {model_vocab} → {tokenizer_vocab}")
-        
-        # Resize token embeddings
-        tts.t3.tfmr.resize_token_embeddings(tokenizer_vocab)
-        
-        # Also resize output embeddings (lm_head)
-        old_lm_head = tts.t3.speech_head
-        new_lm_head = torch.nn.Linear(
-            old_lm_head.in_features,
-            tokenizer_vocab,
-            bias=False,
-            device=device
-        )
-        # Copy old weights
-        with torch.no_grad():
-            new_lm_head.weight[:model_vocab] = old_lm_head.weight[:model_vocab]
-            # Initialize new tokens randomly
-            if tokenizer_vocab > model_vocab:
-                torch.nn.init.normal_(new_lm_head.weight[model_vocab:], mean=0.0, std=0.02)
-        
-        tts.t3.speech_head = new_lm_head
-        
-        print(f"  ✅ Embeddings resized successfully!")
-    else:
-        print(f"  ✅ Vocab sizes match, no resize needed")
-    
     if model_path:
         ckpt_path = Path(model_path)
         print(f"🔄 Overriding with local checkpoint: {ckpt_path}")
         
-        # Case 1: LoRA Adapter
+        # Case 1: LoRA Adapter (with adapter_config.json)
         if (ckpt_path / "adapter_config.json").exists():
-            print("  ✨ Detected LoRA adapter")
+            print("  ✨ Detected LoRA adapter (adapter_config.json)")
             try:
                 from peft import PeftModel, PeftConfig
                 
@@ -151,14 +220,11 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
             except Exception as e:
                 print(f"  ❌ Failed to load LoRA: {e}")
                 
-        # Case 2: Full Finetune (safetensors)
-        # Check for model.safetensors or t3_model.safetensors or pytorch_model.bin
+        # Case 2: Full Finetune or Merged LoRA (safetensors/bin)
         elif (ckpt_path / "model.safetensors").exists() or \
              (ckpt_path / "t3_model.safetensors").exists() or \
              (ckpt_path / "pytorch_model.bin").exists():
              
-            print("  📦 Detected full fine-tuned weights")
-            
             # Find the weight file
             if (ckpt_path / "model.safetensors").exists():
                 w_path = ckpt_path / "model.safetensors"
@@ -172,6 +238,29 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                     state_dict = load_safetensors(w_path)
                 else:
                     state_dict = torch.load(w_path, map_location="cpu", weights_only=True)
+                
+                # Check if this is a LoRA checkpoint (has base_layer/lora_A/lora_B)
+                if _is_lora_checkpoint(state_dict):
+                    print("  ✨ Detected LoRA weights in checkpoint (auto-merging)")
+                    
+                    # Try to read lora config from adapter_config.json or use defaults
+                    lora_alpha, lora_r = 16, 8
+                    try:
+                        import json
+                        adapter_cfg_path = ckpt_path / "adapter_config.json"
+                        if adapter_cfg_path.exists():
+                            with open(adapter_cfg_path) as f:
+                                cfg = json.load(f)
+                                lora_alpha = cfg.get("lora_alpha", 16)
+                                lora_r = cfg.get("r", 8)
+                    except:
+                        pass
+                    
+                    print(f"  Using LoRA config: alpha={lora_alpha}, r={lora_r}")
+                    state_dict = _merge_lora_weights(state_dict, lora_alpha=lora_alpha, lora_r=lora_r)
+                    print(f"  ✅ Merged LoRA weights successfully")
+                else:
+                    print("  📦 Detected full fine-tuned weights")
                 
                 # Handle prefixes from Trainer (e.g. "t3.tfmr..." -> "tfmr...")
                 # The Viterbox T3 model expects keys relative to T3 class
@@ -197,13 +286,20 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                 # Load into T3
                 missing, unexpected = tts.t3.load_state_dict(new_state_dict, strict=False)
                 
+                if len(missing) > 0 and len(missing) < 10:
+                    print(f"  ⚠️ Missing keys: {missing}")
+                elif len(missing) >= 10:
+                    print(f"  ⚠️ Missing {len(missing)} keys (showing first 5): {missing[:5]}...")
+                
                 if len(unexpected) > 0:
-                    print(f"  ⚠️ Unexpected keys: {unexpected[:5]}...")
+                    print(f"  ⚠️ Unexpected keys ({len(unexpected)} total): {unexpected[:5]}...")
                 
                 print(f"  ✅ Loaded weights from {w_path.name}")
                 
             except Exception as e:
+                import traceback
                 print(f"  ❌ Failed to load weights: {e}")
+                traceback.print_exc()
         
     return tts
 
@@ -221,17 +317,8 @@ def main():
     parser.add_argument("--cfg-weight", type=float, default=0.7, help="CFG weight (0.0-1.0), higher is more stable")
     parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature (0.1-1.0), lower is more stable")
     parser.add_argument("--sentence-pause", type=float, default=0.5, help="Pause between sentences in seconds (default 0.5)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     
     args = parser.parse_args()
-    
-    # Setup logging
-    import logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
     
     if not args.text and not args.test_cases:
         parser.error("Either --text or --test-cases must be provided")
@@ -240,16 +327,6 @@ def main():
     try:
         tts = load_model_hybrid(args.device, args.model_path)
         print("✅ Model loaded successfully")
-        
-        # 🔍 Debug: Print model info
-        print(f"\n📊 Model Info:")
-        print(f"  Tokenizer vocab size: {tts.tokenizer.text_dict_size}")
-        print(f"  T3 embedding size: {tts.t3.tfmr.embed_tokens.num_embeddings}")
-        if tts.tokenizer.text_dict_size != tts.t3.tfmr.embed_tokens.num_embeddings:
-            print(f"  ⚠️ WARNING: Vocab size mismatch! This may cause issues.")
-        else:
-            print(f"  ✅ Vocab sizes match!")
-        
     except Exception as e:
         print(f"❌ Failed to load model: {e}")
         import traceback
