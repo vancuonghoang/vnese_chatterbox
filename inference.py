@@ -145,6 +145,11 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                     if k.startswith("t3."):
                         k = k[3:]
                     
+                    # Handle PEFT/LoRA wrappers (base_model.model)
+                    # Mapping: tfmr.base_model.model.X -> tfmr.X
+                    if "base_model.model." in k:
+                        k = k.replace("base_model.model.", "")
+                    
                     new_state_dict[k] = v
                 
                 # Load into T3

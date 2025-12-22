@@ -25,8 +25,8 @@ from transformers import (
 )
 from transformers.trainer_callback import TrainerState, TrainerControl
 
-from loss import T3LossCalculator, LossConfig
-from datasets import LengthGroupedSampler
+from .loss import T3LossCalculator, LossConfig
+from .datasets import LengthGroupedSampler
 
 logger = logging.getLogger(__name__)
 
