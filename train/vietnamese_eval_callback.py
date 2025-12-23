@@ -9,7 +9,10 @@ import librosa
 import soundfile as sf
 
 from viterbox.tts import Viterbox
-from .vietnamese_test_cases import TEST_CASES
+try:
+    from .vietnamese_test_cases import TEST_CASES
+except ImportError:
+    from vietnamese_test_cases import TEST_CASES
 
 logger = logging.getLogger(__name__)
 

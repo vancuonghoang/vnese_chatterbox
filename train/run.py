@@ -26,6 +26,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, List
 
+# Add current directory to path so imports like 'from loss import ...' work
+sys.path.insert(0, str(Path(__file__).parent))
+
 import torch
 from transformers import (
     TrainingArguments,
@@ -294,7 +297,19 @@ def main():
     collator = SpeechDataCollator(speech_cond_prompt_len=t3_config.speech_cond_prompt_len)
     
     # Callbacks
-    from train.vietnamese_eval_callback import VietnameseEvalCallback
+    # Prioritize local import (since we added sys.path)
+    try:
+        from vietnamese_eval_callback import VietnameseEvalCallback
+    except ImportError:
+        try:
+            from train.vietnamese_eval_callback import VietnameseEvalCallback
+        except ImportError:
+            # Last resort: try adding the train directory explicitly if not yet added
+            import sys
+            if str(Path(__file__).parent) not in sys.path:
+                sys.path.insert(0, str(Path(__file__).parent))
+            from vietnamese_eval_callback import VietnameseEvalCallback 
+
     callbacks = [
         ResumeVerificationCallback(),  # Logs resume details
         VietnameseEvalCallback(
