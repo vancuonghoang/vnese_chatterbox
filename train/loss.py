@@ -39,9 +39,9 @@ LOGIT_CLAMP_MAX = 100.0
 @dataclass
 class LossConfig:
     """Configuration for T3 loss computation"""
-    # Loss weights
-    text_weight: float = 0.1
-    speech_weight: float = 1.0
+    # Loss weights (Tier 1 optimization: prioritize speech for voice adaptation)
+    text_weight: float = 0.05  # Reduced from 0.1 - text is learned quickly
+    speech_weight: float = 2.0  # Increased from 1.0 - critical for voice quality
     
     # Label smoothing (built-in torch support)
     label_smoothing: float = 0.1

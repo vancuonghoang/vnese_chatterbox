@@ -88,21 +88,35 @@ python train/run.py \
     --use_wandb
 ```
 
-### Cách 2: LoRA Fine-tuning (Khuyên dùng cho 2-5h audio)
+### Cách 2: LoRA Fine-tuning (Khuyên dùng cho 2-5h audio) ⭐ UPDATED
 
-Tối ưu cho dataset nhỏ, train nhanh và nhẹ (chạy tốt trên T4 GPU 16GB).
+**Tối ưu mới (Tier 1)**: Tăng capacity và focus vào voice quality!
 
 ```bash
 python train/run.py \
     --preprocessed_dir ./preprocessed \
     --output_dir ./checkpoints/vietnamese_lora \
-    --epochs 10 \
+    --epochs 20 \
     --batch_size 8 \
-    --lr 1e-4 \
+    --lr 5e-4 \
     --use_lora \
-    --lora_r 8 \
+    --lora_r 32 \
+    --lora_alpha 64 \
+    --text_weight 0.05 \
+    --speech_weight 2.0 \
     --use_wandb
 ```
+
+**Thay đổi quan trọng**:
+- ✅ `lora_r=32` (tăng từ 8): Nhiều capacity hơn 4x để học voice patterns
+- ✅ `lora_alpha=64` (tăng từ 16): Tỷ lệ scaling tương ứng
+- ✅ Target modules: Bao gồm cả MLP layers (gate_proj, up_proj, down_proj)
+- ✅ `text_weight=0.05`: Giảm focus vào text (học nhanh)  
+- ✅ `speech_weight=2.0`: Tăng focus vào voice quality
+- ✅ `lr=5e-4`: Learning rate cao hơn cho LoRA (từ 1e-4)
+- ✅ `epochs=20`: Train lâu hơn để học tốt voice
+
+**Kết quả mong đợi**: Voice adaptation từ 3/10 → 7-9/10
 
 **Các tính năng nâng cao đã bật mặc định:**
 - ✅ **Safe Z-Loss**: Ổn định training, tránh NaN.
