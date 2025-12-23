@@ -290,6 +290,10 @@ class T3(nn.Module):
 
         device = embeds.device
 
+        # Safety check: ensure max_new_tokens is set
+        if max_new_tokens is None or max_new_tokens <= 0:
+            max_new_tokens = self.hp.max_speech_tokens
+            
         bos_token = torch.tensor([[self.hp.start_speech_token]], dtype=torch.long, device=device)
         bos_embed = self.speech_emb(bos_token)  # shape: (B, 1, embed_dim)
         bos_embed = bos_embed + self.speech_pos_emb.get_fixed_embedding(0)
@@ -309,16 +313,28 @@ class T3(nn.Module):
         repetition_penalty_processor = RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty)
 
         # ---- Initial Forward Pass (no kv_cache yet) ----
-        output = self.patched_model(
-            inputs_embeds=inputs_embeds,
-            past_key_values=None,
-            use_cache=True,
-            output_attentions=True,
-            output_hidden_states=True,
-            return_dict=True,
-        )
+        try:
+            output = self.patched_model(
+                inputs_embeds=inputs_embeds,
+                past_key_values=None,
+                use_cache=True,
+                output_attentions=True,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+        except Exception as e:
+            print(f"❌ Initial forward pass failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+            
         # Initialize kv_cache with the full context.
         past = output.past_key_values
+        
+        # Safety check: ensure we have valid logits
+        if output.logits is None or output.logits.numel() == 0:
+            print(f"❌ Invalid logits from initial forward pass")
+            return None
 
         # ---- Generation Loop using kv_cache ----
         for i in tqdm(range(max_new_tokens), desc="Sampling", dynamic_ncols=True):
@@ -357,16 +373,29 @@ class T3(nn.Module):
             next_token_embed = torch.cat([next_token_embed, next_token_embed])
 
             # Forward pass with only the new token and the cached past.
-            output = self.patched_model(
-                inputs_embeds=next_token_embed,
-                past_key_values=past,
-                output_attentions=True,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            # Update the kv_cache.
-            past = output.past_key_values
+            try:
+                output = self.patched_model(
+                    inputs_embeds=next_token_embed,
+                    past_key_values=past,
+                    output_attentions=True,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                # Update the kv_cache.
+                past = output.past_key_values
+            except Exception as e:
+                print(f"❌ Forward pass failed at step {i}: {e}")
+                break
 
+        # Safety check: ensure we generated something
+        if len(predicted) == 0:
+            print(f"❌ No tokens generated! This usually means:")
+            print(f"   - Model weights not loaded correctly")
+            print(f"   - Device mismatch (model on {self.device}, inputs on {device})")
+            print(f"   - CFG batch size mismatch")
+            print(f"   - max_new_tokens was 0 or None")
+            return None
+            
         # Concatenate all predicted tokens along the sequence dimension.
         predicted_tokens = torch.cat(predicted, dim=1)  # shape: (B, num_tokens)
         return predicted_tokens

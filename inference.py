@@ -197,7 +197,7 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
         ckpt_path = Path(model_path)
         print(f"🔄 Overriding with local checkpoint: {ckpt_path}")
         
-        # Case 1: LoRA Adapter (with adapter_config.json)
+        # Case 1: LoRA Adapter (PRIORITY - check first!)
         if (ckpt_path / "adapter_config.json").exists():
             print("  ✨ Detected LoRA adapter (adapter_config.json)")
             try:
@@ -206,21 +206,28 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                 # Load configuration
                 config = PeftConfig.from_pretrained(str(ckpt_path))
                 
-                # We need to wrap the internal transformer (t3.tfmr)
-                # Note: viterbox.tts.py loads T3, which has .tfmr (LlamaModel)
-                
-                # Apply LoRA
+                # Apply LoRA to the transformer backbone
                 print("  Applying LoRA adapters to T3 backbone...")
                 tts.t3.tfmr = PeftModel.from_pretrained(tts.t3.tfmr, str(ckpt_path))
                 tts.t3.to(device)
                 
-                print("  ✅ LoRA adapters merged successfully")
+                print("  ✅ LoRA adapters loaded successfully")
+                
+                # CRITICAL FIX: Early return to prevent loading model.safetensors
+                # This is the key fix - without this, code falls through to Case 2
+                # and loads base weights instead of LoRA weights!
+                return tts
+                
             except ImportError:
                 print("  ⚠️ PEFT library not found. Cannot load LoRA adapter.")
+                print("  Attempting to fall back to full weights...")
             except Exception as e:
-                print(f"  ❌ Failed to load LoRA: {e}")
+                print(f"  ❌ Failed to load LoRA adapter: {e}")
+                print("  Attempting to fall back to full weights...")
+                import traceback
+                traceback.print_exc()
                 
-        # Case 2: Full Finetune or Merged LoRA (safetensors/bin)
+        # Case 2: Full Finetune or Merged LoRA (only if LoRA loading failed or not present)
         elif (ckpt_path / "model.safetensors").exists() or \
              (ckpt_path / "t3_model.safetensors").exists() or \
              (ckpt_path / "pytorch_model.bin").exists():
@@ -286,6 +293,7 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                 # Load into T3
                 missing, unexpected = tts.t3.load_state_dict(new_state_dict, strict=False)
                 
+                # Validate loading
                 if len(missing) > 0 and len(missing) < 10:
                     print(f"  ⚠️ Missing keys: {missing}")
                 elif len(missing) >= 10:
@@ -293,6 +301,29 @@ def load_model_hybrid(device: str, model_path: str = None) -> Viterbox:
                 
                 if len(unexpected) > 0:
                     print(f"  ⚠️ Unexpected keys ({len(unexpected)} total): {unexpected[:5]}...")
+                
+                # Move model to device and set to eval
+                tts.t3.to(device).eval()
+                
+                # Verify model is on correct device
+                print(f"  📍 Model device: {tts.t3.device}")
+                print(f"  📍 Text embeddings shape: {tts.t3.text_emb.weight.shape}")
+                print(f"  📍 Speech embeddings shape: {tts.t3.speech_emb.weight.shape}")
+                
+                # Test forward pass with dummy input
+                try:
+                    with torch.no_grad():
+                        dummy_text = torch.randint(0, 100, (1, 10), device=device)
+                        dummy_speech = torch.randint(0, 100, (1, 10), device=device)
+                        
+                        # Try embedding lookup
+                        test_emb = tts.t3.text_emb(dummy_text)
+                        print(f"  ✅ Text embedding test passed, shape: {test_emb.shape}")
+                        
+                except Exception as e:
+                    print(f"  ❌ Model validation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
                 print(f"  ✅ Loaded weights from {w_path.name}")
                 

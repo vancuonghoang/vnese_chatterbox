@@ -9,6 +9,9 @@ from types import MethodType
 
 logger = logging.getLogger(__name__)
 
+# Global flag to track if we've already warned about sdpa (warn only once per session)
+_SDPA_WARNING_SHOWN = False
+
 
 @dataclass
 class AlignmentAnalysisResult:
@@ -54,6 +57,7 @@ class AlignmentStreamAnalyzer:
         # using it for all layers slows things down too much. We can apply it to just one layer
         # by intercepting the kwargs and adding a forward hook (credit: jrm)
         self.last_aligned_attn = None
+        self._alignment_disabled_warned = False  # Track if we've warned about disabled alignment
         self._add_attention_spy(tfmr, alignment_layer_idx)
 
     def _add_attention_spy(self, tfmr, alignment_layer_idx):
@@ -70,7 +74,22 @@ class AlignmentStreamAnalyzer:
             NOTE:
             - When `output_attentions=True`, `LlamaSdpaAttention.forward` calls `LlamaAttention.forward`.
             - `attn_output` has shape [B, H, T0, T0] for the 0th entry, and [B, H, 1, T0+i] for the rest i-th.
+            - With sdpa backend, output[1] may be None. In this case, skip alignment tracking.
             """
+            global _SDPA_WARNING_SHOWN
+            
+            # Handle case where attention weights are not available (sdpa backend)
+            if output[1] is None:
+                # Only warn once per session (global flag)
+                if not _SDPA_WARNING_SHOWN:
+                    logger.info(
+                        "ℹ️ Alignment tracking disabled (sdpa backend). "
+                        "This is normal and won't affect generation quality."
+                    )
+                    _SDPA_WARNING_SHOWN = True
+                self.last_aligned_attn = None
+                return
+                
             step_attention = output[1].cpu() # (B, 16, N, N)
             self.last_aligned_attn = step_attention[0].mean(0) # (N, N)
 
@@ -90,6 +109,18 @@ class AlignmentStreamAnalyzer:
         """
         Emits an AlignmentAnalysisResult into the output queue, and potentially modifies the logits to force an EOS.
         """
+        # If alignment tracking is disabled (sdpa backend), skip all alignment-based checks
+        if self.last_aligned_attn is None:
+            self.curr_frame_pos += 1
+            return AlignmentAnalysisResult(
+                false_start=False,
+                long_tail=False,
+                repetition=False,
+                discontinuity=False,
+                complete=False,
+                position=self.curr_frame_pos,
+            ), logits
+        
         # extract approximate alignment matrix chunk (1 frame at a time after the first chunk)
         aligned_attn = self.last_aligned_attn # (N, N)
         i, j = self.text_tokens_slice
